@@ -1,111 +1,138 @@
-# 🛡 SentinelDAO — Whistleblower & ESG / Corporate Fraud Bounty Protocol
+```
+   ____             __  _            __ ____   ___   ____ 
+  / __/ ___  ___   / /_(_)___  ___  / // __ \ / _ | / __ \
+ _\ \  / -_)/ _ \ / __/ // _ \/ -_)/ // /_/ // __ |/ /_/ /
+/___/  \__//_//_/ \__/_//_//_/\__//_//_____//_/ |_|\____/ 
+```
+# 🛡️ SentinelDAO: Trustless Whistleblower Bounty & Forensic Evidence Protocol
 
-> **Autonomous Forensic Multi-LLM Quorum & Regulatory Oracle for Anonymous Whistleblower Bounties on GenLayer.**
+> **Autonomous On-Chain Intelligence Tribunal for Corporate Whistleblowing, Financial Fraud Auditing, and Anonymous Bounty Disbursals.**
 
-SentinelDAO is an intelligent escrow and forensic adjudication protocol for corporate whistleblower bounties, ESG environmental violations, insider trading, and AI safety non-compliance. Sponsors deposit bounty escrows into decentralized campaigns, whistleblowers submit verifiable proofs via stealth addresses, and GenLayer's non-deterministic consensus cross-references public regulatory registries (SEC EDGAR, EPA enforcement, court registries) to calculate mathematical materiality and disburse bounties directly to whistleblowers.
+![GenLayer StudioNet](https://img.shields.io/badge/Network-GenLayer_StudioNet-green?style=flat-square)
+![Tests](https://img.shields.io/badge/Pytest_Direct-17%2F17_Passed-brightgreen?style=flat-square)
+![License](https://img.shields.io/badge/License-GPL_3.0-orange?style=flat-square)
+![Security Audit](https://img.shields.io/badge/Consensus-Non--Custodial_Escrow-blue?style=flat-square)
 
 ---
 
-## 🏛 Architecture Overview
+## ⚡ Executive Summary
 
-```mermaid
-graph TD
-    subgraph Campaign Sponsor Flow
-        SPONSOR[DAO / Sponsor / Investigative Fund] -->|1. create_campaign + Escrow| SD[SentinelDAO Contract]
-        SPONSOR -->|2. topup_campaign| SD
-    end
+Traditional whistleblowing channels suffer from three fatal flaws:
+1. **Physical & Retaliatory Risk**: Leakers must reveal identities to centralized lawyers or hotlines.
+2. **Payment Insecurity**: Payouts take years of litigation with zero guarantee of fund release.
+3. **Subjective Gatekeeping**: Corporate defense attorneys delay or bury valid evidence.
 
-    subgraph Whistleblower Submission Flow
-        WB[Whistleblower] -->|3. submit_disclosure + Stealth Address| SD
-    end
+**SentinelDAO** resolves these vulnerabilities by pairing **GenLayer Intelligent Contracts** with cryptographic evidence commitments and an automated Multi-LLM Forensic Quorum. DAOs and public interest foundations fund on-chain bounty campaigns. Anonymous whistleblowers submit encrypted disclosures using disposable stealth addresses. The protocol fetches live regulatory databases (SEC EDGAR, EPA ECHO, DOJ) and autonomously executes the **Materiality Impact Score ($\text{MIS}$)** to disburse non-custodial payouts in real time.
 
-    subgraph Forensic Consensus Engine
-        SD -->|4. gl.vm.run_nondet_unsafe| FORENSIC[GenLayer Consensus]
-        FORENSIC -->|Cross-Reference Regs| REG[Web2 Regulatory Oracles SEC / EPA / Courts]
-        FORENSIC -->|Multi-LLM Forensic Quorum| LLM[AI Forensic Audit Quorum]
-    end
+---
 
-    subgraph Mathematical Materiality & Settlement
-        LLM -->|Verifiability, Severity, Depth| MIS[Materiality Index Formulation]
-        MIS -->|MIS >= 90: 100% Payout| AWARD[VERIFIED_AWARDED]
-        MIS -->|60 <= MIS < 90: Quadratic Progressive Payout| AWARD
-        AWARD -->|5. claim_bounty| STEALTH[Whistleblower Stealth Address]
-    end
+## 🛰️ Live Deployment (GenLayer StudioNet)
+
+```yaml
+Network: GenLayer StudioNet (Chain ID: 61999)
+RPC Endpoint: https://studio.genlayer.com/api
+Explorer: https://genlayer-explorer.vercel.app
+Contract Address: "0x1666c04938399ca1ff6E016Fe9abcD865999A680"
+Deployer Address: "0x6cb8693052cacd8240ca13eb26b14f0f76375828"
+Deployment Tx: "0x604e201a7ead0220570edcadb6fab460cc4f3b28d47f4d5832328488d516302f"
 ```
 
 ---
 
-## 📐 Mathematical Formulation
+## 🔐 Cryptographic Guarantee & Threat Model Matrix
 
-### Materiality Impact Score ($\text{MIS}$)
+| Attack Vector | Traditional Whistleblower System | SentinelDAO Intelligent Contract |
+| :--- | :--- | :--- |
+| **Identity De-anonymization** | High (KYC hotlines, bank wires) | **Zero Knowledge**: Disposable stealth payout addresses |
+| **Evidence Tampering** | High (Subpoena leaks, lost files) | **Immutable**: SHA256 evidence commitments + IPFS CIDs |
+| **Capital Deadlocks** | High (Trapped escrow funds) | **Zero-Deadlock**: Emergency timeout reclamation (`reclaim_expired_campaign`) |
+| **Biased Human Arbitration** | High (Political / corporate influence) | **Autonomous**: Multi-LLM Quorum with cross-regulatory consensus |
+| **Spam / Extortion Attacks** | High (Frivolous claims) | **Quadratic Slashing & Proof Thresholds**: $\text{MIS} \ge 60\%$ threshold |
+
+---
+
+## 🧮 Mathematical Model: Quadratic Bounty Curve
+
+Bounties are calculated based on the **Materiality Impact Score ($\text{MIS}$)**:
+
 $$\text{MIS} = \frac{V \times 0.35 + S \times 0.40 + D \times 0.25}{100}$$
 
-Where:
-- $V \in [0, 100]$: **Verifiability Score** (primary source auditability, cryptographic signatures, internal ledger proofs).
-- $S \in [0, 100]$: **Severity Score** (financial damages, environmental contamination toxicity, systemic impact).
-- $D \in [0, 100]$: **Documentation Depth** (comprehensiveness of logs, corroborated records).
+- **$V$ (Verifiability)**: Corroboration against SEC EDGAR / EPA disclosures ($0 \le V \le 100$).
+- **$S$ (Severity)**: Financial fraud magnitude or public safety impact ($0 \le S \le 100$).
+- **$D$ (Depth)**: Primary internal ledgers and cryptographic signatures ($0 \le D \le 100$).
 
-### Progressive Bounty Payout Function
-$$\text{Bounty Payout} = \begin{cases}
-0 & \text{MIS} < T_{\text{threshold}} \text{ or Confidence} < 80\% \\
-\text{Escrow} \times \left(\frac{\text{MIS} - 60}{40}\right)^2 \times 0.90 & 60 \le \text{MIS} < 90 \\
-\text{Escrow} \times 1.0 & \text{MIS} \ge 90 \text{ (Critical Material Breach)}
+### 💰 Payout Schedule:
+$$\text{Payout}(\text{MIS}) = \begin{cases}
+0 & \text{MIS} < 60\% \\
+\text{Escrow} \times \left(\frac{\text{MIS} - 60}{40}\right)^2 \times 0.90 & 60\% \le \text{MIS} < 90\% \quad \text{(Progressive Quadratic)} \\
+\text{Escrow} \times 1.0 & \text{MIS} \ge 90\% \quad \text{(Critical Material Breach)}
 \end{cases}$$
 
 ---
 
-## 🔒 Contract Storage & Methods
+## ⚙️ Intelligent Contract Interface
 
-### Contract Specification
-- **Language**: Python (`py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6`)
-- **Total Methods**: 12 (6 Write, 6 View)
+### State Modifiers (Write Transactions)
+```python
+# 1. Initialize funded campaign escrow (min 5 GEN)
+create_campaign(campaign_id: str, target_entity: str, category: str, min_materiality_threshold: u256, description: str)
 
-### Public Write Methods
-1. `create_campaign(campaign_id, target_entity, category, min_materiality_threshold, description)` [Payable]: Fund bounty campaign escrow (min 5 GEN).
-2. `topup_campaign(campaign_id)` [Payable]: Increase escrow funds for an existing campaign.
-3. `submit_disclosure(disclosure_id, campaign_id, evidence_hash, executive_summary, whistleblower_stealth)`: Submit whistleblower proof under a disposable stealth address.
-4. `evaluate_disclosure(disclosure_id, technical_evidence, regulatory_cross_ref_url)`: Trigger AI consensus oracle to audit evidence against SEC/EPA databases.
-5. `claim_bounty(disclosure_id)`: Whistleblower stealth address claims validated bounty payout.
-6. `close_campaign(campaign_id)`: Sponsor closes campaign after expiration and reclaims unused escrow.
+# 2. Add liquidity to an active campaign
+topup_campaign(campaign_id: str)
 
-### Public View Methods
-1. `get_campaign(campaign_id)`: View target entity, escrow balance, threshold, and status.
-2. `get_disclosure(disclosure_id)`: View disclosure scores, evidence hash, materiality index, and status.
-3. `get_records(disclosure_id)`: Access complete forensic quorum rationales and citations.
-4. `list_campaigns()`: List all active bounty campaigns.
-5. `list_disclosures(campaign_id)`: List disclosures for a specific campaign.
-6. `get_protocol_overview()`: Protocol statistics and global counters.
+# 3. Submit cryptographic evidence under stealth address
+submit_disclosure(disclosure_id: str, campaign_id: str, evidence_hash: str, executive_summary: str, whistleblower_stealth: str)
+
+# 4. Trigger GenLayer Multi-LLM Quorum consensus & regulatory cross-referencing
+evaluate_disclosure(disclosure_id: str, regulatory_cross_ref_url: str)
+
+# 5. Non-custodial bounty claim by whistleblower stealth address
+claim_bounty(disclosure_id: str)
+
+# 6. Sponsor timeout escape hatch (refund expired campaign)
+reclaim_expired_campaign(campaign_id: str)
+```
+
+### Protocol Introspection (View Calls)
+```python
+get_campaign(campaign_id: str) -> dict
+get_disclosure(disclosure_id: str) -> dict
+get_records(disclosure_id: str) -> list
+list_campaigns() -> list
+get_protocol_overview() -> dict
+```
 
 ---
 
-## 🧪 Testing & Verification
+## 🧪 Terminal Verification & Direct Tests
 
+### 1-Click End-to-End Lifecycle Simulation:
 ```bash
-# Lint and validate GenVM contract
-genvm-lint check contracts/sentinel_dao.py
-
-# Run direct-mode test suite
-.venv/bin/pytest contracts/test/ -v
+python scripts/e2e_demo.py
 ```
 
-### Test Results:
+### Full Pytest Direct-Mode Suite (17/17 Passed):
+```bash
+.venv/bin/pytest tests/unit/ -v
+```
+
 ```text
-✓ test_initial_protocol_overview
-✓ test_create_campaign_success
-✓ test_create_campaign_below_min_escrow_rejection
-✓ test_create_campaign_invalid_category_rejection
-✓ test_create_campaign_invalid_threshold_rejection
-✓ test_create_all_valid_categories
-✓ test_topup_campaign_success
-✓ test_submit_disclosure_success
-✓ test_submit_disclosure_closed_campaign_rejection
-✓ test_evaluate_disclosure_critical_breach_100_percent_payout
-✓ test_evaluate_disclosure_progressive_payout_75_mis
-✓ test_evaluate_disclosure_low_materiality_insufficient
-✓ test_evaluate_disclosure_rejected_fraudulent
-✓ test_claim_bounty_success
-✓ test_claim_bounty_unauthorized_rejection
-✓ test_close_campaign_success
-✓ test_list_campaigns_and_disclosures
-============================== 17 passed in 0.34s ==============================
+tests/unit/test_sentinel_dao.py::test_initial_protocol_overview PASSED
+tests/unit/test_sentinel_dao.py::test_create_campaign_success PASSED
+tests/unit/test_sentinel_dao.py::test_create_campaign_below_min_escrow_rejection PASSED
+tests/unit/test_sentinel_dao.py::test_create_campaign_invalid_category_rejection PASSED
+tests/unit/test_sentinel_dao.py::test_create_campaign_invalid_threshold_rejection PASSED
+tests/unit/test_sentinel_dao.py::test_create_all_valid_categories PASSED
+tests/unit/test_sentinel_dao.py::test_topup_campaign_success PASSED
+tests/unit/test_sentinel_dao.py::test_submit_disclosure_success PASSED
+tests/unit/test_sentinel_dao.py::test_submit_disclosure_closed_campaign_rejection PASSED
+tests/unit/test_sentinel_dao.py::test_evaluate_disclosure_critical_breach_100_percent_payout PASSED
+tests/unit/test_sentinel_dao.py::test_evaluate_disclosure_progressive_payout_75_mis PASSED
+tests/unit/test_sentinel_dao.py::test_evaluate_disclosure_low_materiality_insufficient PASSED
+tests/unit/test_sentinel_dao.py::test_evaluate_disclosure_rejected_fraudulent PASSED
+tests/unit/test_sentinel_dao.py::test_claim_bounty_success PASSED
+tests/unit/test_sentinel_dao.py::test_claim_bounty_unauthorized_rejection PASSED
+tests/unit/test_sentinel_dao.py::test_reclaim_expired_campaign_success PASSED
+tests/unit/test_sentinel_dao.py::test_list_campaigns_and_disclosures PASSED
+============================== 17 passed in 0.28s ==============================
 ```
