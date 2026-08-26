@@ -2,7 +2,7 @@
 
 import json
 
-CONTRACT_PATH = "contracts/sentinel_dao.py"
+CONTRACT_PATH = "protocol/sentinel_dao.py"
 FORENSIC_PROMPT_PATTERN = r".*Senior Corporate Fraud Investigator and Forensic Auditor.*"
 
 
