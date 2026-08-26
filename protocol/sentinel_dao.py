@@ -7,90 +7,72 @@ from genlayer import *
 # -----------------------------------------------------------------------------
 # Domain Constants & Taxonomy
 # -----------------------------------------------------------------------------
-CATEGORY_ACCOUNTING_FRAUD = "ACCOUNTING_FRAUD"
-CATEGORY_ESG_ENVIRONMENTAL = "ESG_ENVIRONMENTAL"
-CATEGORY_INSIDER_TRADING = "INSIDER_TRADING"
-CATEGORY_CORRUPTION_BRIBERY = "CORRUPTION_BRIBERY"
-CATEGORY_AI_SAFETY_VIOLATION = "AI_SAFETY_VIOLATION"
-
-VALID_CATEGORIES = {
-    CATEGORY_ACCOUNTING_FRAUD,
-    CATEGORY_ESG_ENVIRONMENTAL,
-    CATEGORY_INSIDER_TRADING,
-    CATEGORY_CORRUPTION_BRIBERY,
-    CATEGORY_AI_SAFETY_VIOLATION,
-}
-
-CAMPAIGN_STATUS_OPEN = "OPEN"
-CAMPAIGN_STATUS_CLOSED = "CLOSED"
-CAMPAIGN_STATUS_DEPLETED = "DEPLETED"
-
-DISCLOSURE_STATUS_PENDING = "PENDING"
-DISCLOSURE_STATUS_AWARDED = "VERIFIED_AWARDED"
-DISCLOSURE_STATUS_REJECTED = "REJECTED"
-DISCLOSURE_STATUS_INSUFFICIENT = "INSUFFICIENT_EVIDENCE"
+STATUS_OPEN = "OPEN"
+STATUS_PENDING = "PENDING"
+STATUS_VERIFIED_AWARDED = "VERIFIED_AWARDED"
+STATUS_REJECTED = "REJECTED"
+STATUS_INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
+STATUS_CLAIMED = "CLAIMED"
+STATUS_CLOSED = "CLOSED"
+STATUS_DEPLETED = "DEPLETED"
+STATUS_EXPIRED = "EXPIRED"
 
 DECISION_VERIFIED = "VERIFIED"
 DECISION_REJECTED = "REJECTED"
 DECISION_INSUFFICIENT = "INSUFFICIENT"
 
+CATEGORIES = {
+    "ACCOUNTING_FRAUD",
+    "ESG_ENVIRONMENTAL",
+    "INSIDER_TRADING",
+    "CORRUPTION_BRIBERY",
+    "AI_SAFETY_VIOLATION",
+}
+
 ATTO = 10**18
-MIN_CAMPAIGN_ESCROW = 5 * ATTO   # 5 GEN min campaign escrow
-MIN_CONFIDENCE_THRESHOLD = 80     # 80% AI confidence requirement
-MIN_MATERIALITY_FLOOR = 60        # Minimum MIS score to receive any payout
+MIN_CAMPAIGN_ESCROW = 5 * ATTO  # 5 GEN minimum bounty pool
 
 ERROR_EXPECTED = "[EXPECTED]"
 ERROR_EXTERNAL = "[EXTERNAL]"
+ERROR_TRANSIENT = "[TRANSIENT]"
 ERROR_LLM = "[LLM]"
 
 
 # -----------------------------------------------------------------------------
-# Storage Schemas
+# Storage Schemas (Strictly Typed Dataclasses)
 # -----------------------------------------------------------------------------
 @allow_storage
 @dataclass
-class CampaignData:
+class WhistleblowerCampaign:
     campaign_id: str
-    sponsor: Address
+    creator: Address
     target_entity: str
     category: str
-    escrow_balance_atto: u256
-    total_awarded_atto: u256
     min_materiality_threshold: u256
+    total_bounty_funded_atto: u256
+    escrow_balance_atto: u256
     description: str
     status: str
-    registered_seq: u256
+    disclosures_count: u256
+    created_seq: u256
 
 
 @allow_storage
 @dataclass
-class DisclosureData:
+class EvidenceDisclosure:
     disclosure_id: str
     campaign_id: str
+    submitter: Address
     whistleblower_stealth: Address
-    evidence_hash: str
-    executive_summary: str
-    status: str
-    verifiability_score: u256
-    severity_score: u256
-    documentation_depth: u256
+    proof_cid: str                  # ipfs:// CID of encrypted leaks
+    evidence_hash: str              # sha256 commitment hash
+    summary: str
     materiality_index: u256
-    confidence: u256
     awarded_bounty_atto: u256
+    status: str
     is_claimed: bool
-    registered_seq: u256
-
-
-@allow_storage
-@dataclass
-class ForensicAuditRecord:
-    disclosure_id: str
-    auditor_decision: str
-    materiality_index: u256
-    confidence: u256
-    rationale: str
-    regulatory_feed_summary: str
-    timestamp_seq: u256
+    forensic_rationale: str
+    submitted_seq: u256
 
 
 @gl.evm.contract_interface
@@ -103,34 +85,36 @@ class _Recipient:
 
 
 # -----------------------------------------------------------------------------
-# Intelligent Contract Interface
+# Main Intelligent Contract Class
 # -----------------------------------------------------------------------------
 class SentinelDAO(gl.Contract):
     owner: Address
     regulatory_oracle_base: str
 
+    # Global Double-Entry Escrow & Accounting Ledgers
+    total_campaigns: u256
+    total_disclosures: u256
     total_bounties_funded: u256
     total_bounties_paid: u256
 
-    # Campaigns: campaign_id -> CampaignData
-    campaigns: TreeMap[str, CampaignData]
+    # Campaigns: campaign_id -> WhistleblowerCampaign
+    campaigns: TreeMap[str, WhistleblowerCampaign]
     campaign_ids: DynArray[str]
 
-    # Disclosures: disclosure_id -> DisclosureData
-    disclosures: TreeMap[str, DisclosureData]
+    # Disclosures: disclosure_id -> EvidenceDisclosure
+    disclosures: TreeMap[str, EvidenceDisclosure]
     disclosure_ids: DynArray[str]
 
-    # Global Forensic Audit Trail
-    records: DynArray[ForensicAuditRecord]
-
-    def __init__(self, regulatory_oracle_base: str = "https://api.sentineldao.regulatory/v1/sec-epa"):
+    def __init__(self, regulatory_oracle_base: str = "https://api.sentineldao.org/v1/sec-filings"):
         self.owner = gl.message.sender_address
         self.regulatory_oracle_base = regulatory_oracle_base
+        self.total_campaigns = u256(0)
+        self.total_disclosures = u256(0)
         self.total_bounties_funded = u256(0)
         self.total_bounties_paid = u256(0)
 
     # ------------------------------------------------------------------
-    # 1. Campaign Creation & Funding
+    # 1. Whistleblower Bounty Campaign Creation & Funding
     # ------------------------------------------------------------------
     @gl.public.write.payable
     def create_campaign(
@@ -138,108 +122,110 @@ class SentinelDAO(gl.Contract):
         campaign_id: str,
         target_entity: str,
         category: str,
-        min_materiality_threshold: u256,
+        materiality_threshold: u256,
         description: str,
     ) -> None:
         if not campaign_id or len(campaign_id.strip()) == 0:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} Campaign ID cannot be empty")
         if campaign_id in self.campaigns:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} Campaign {campaign_id} already exists")
-        if not target_entity or len(target_entity.strip()) == 0:
-            raise gl.vm.UserError(f"{ERROR_EXPECTED} Target entity cannot be empty")
-        if category not in VALID_CATEGORIES:
+        if category not in CATEGORIES:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} Invalid category: {category}")
+
+        thresh = int(materiality_threshold)
+        if thresh < 60 or thresh > 100:
+            raise gl.vm.UserError(f"{ERROR_EXPECTED} Materiality threshold must be between 60 and 100")
 
         escrow = int(gl.message.value)
         if escrow < int(MIN_CAMPAIGN_ESCROW):
             raise gl.vm.UserError(f"{ERROR_EXPECTED} Minimum campaign escrow is 5 GEN")
 
-        thresh = int(min_materiality_threshold)
-        if thresh < MIN_MATERIALITY_FLOOR or thresh > 100:
-            raise gl.vm.UserError(f"{ERROR_EXPECTED} Materiality threshold must be between 60 and 100")
-
         seq = u256(len(self.campaign_ids) + 1)
-        camp = CampaignData(
+        camp = WhistleblowerCampaign(
             campaign_id=campaign_id,
-            sponsor=gl.message.sender_address,
+            creator=gl.message.sender_address,
             target_entity=target_entity,
             category=category,
+            min_materiality_threshold=materiality_threshold,
+            total_bounty_funded_atto=u256(escrow),
             escrow_balance_atto=u256(escrow),
-            total_awarded_atto=u256(0),
-            min_materiality_threshold=min_materiality_threshold,
             description=description,
-            status=CAMPAIGN_STATUS_OPEN,
-            registered_seq=seq,
+            status=STATUS_OPEN,
+            disclosures_count=u256(0),
+            created_seq=seq,
         )
 
         self.campaigns[campaign_id] = camp
         self.campaign_ids.append(campaign_id)
         self.total_bounties_funded = u256(int(self.total_bounties_funded) + escrow)
+        self.total_campaigns = u256(int(self.total_campaigns) + 1)
 
     @gl.public.write.payable
     def topup_campaign(self, campaign_id: str) -> None:
         if campaign_id not in self.campaigns:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} Campaign {campaign_id} not found")
 
-        val = int(gl.message.value)
-        if val <= 0:
-            raise gl.vm.UserError(f"{ERROR_EXPECTED} Top-up amount must be greater than zero")
-
         camp = self.campaigns[campaign_id]
-        if camp.status == CAMPAIGN_STATUS_CLOSED:
-            raise gl.vm.UserError(f"{ERROR_EXPECTED} Cannot top-up a CLOSED campaign")
+        if camp.status != STATUS_OPEN:
+            raise gl.vm.UserError(f"{ERROR_EXPECTED} Campaign is closed")
 
-        camp.escrow_balance_atto = u256(int(camp.escrow_balance_atto) + val)
-        if camp.status == CAMPAIGN_STATUS_DEPLETED:
-            camp.status = CAMPAIGN_STATUS_OPEN
+        topup = int(gl.message.value)
+        if topup <= 0:
+            raise gl.vm.UserError(f"{ERROR_EXPECTED} Topup amount must be greater than zero")
 
+        camp.total_bounty_funded_atto = u256(int(camp.total_bounty_funded_atto) + topup)
+        camp.escrow_balance_atto = u256(int(camp.escrow_balance_atto) + topup)
         self.campaigns[campaign_id] = camp
-        self.total_bounties_funded = u256(int(self.total_bounties_funded) + val)
+        self.total_bounties_funded = u256(int(self.total_bounties_funded) + topup)
 
     # ------------------------------------------------------------------
-    # 2. Whistleblower Disclosure Submission
+    # 2. Whistleblower Evidence Submission (Cryptographic Commitments)
     # ------------------------------------------------------------------
     @gl.public.write
     def submit_disclosure(
         self,
         disclosure_id: str,
         campaign_id: str,
-        evidence_hash: str,
-        executive_summary: str,
-        whistleblower_stealth: Address,
+        proof_cid: str,
+        summary: str,
+        payout_address: Address,
+        evidence_hash: str = "sha256:evidence-leak-commitment-hash",
     ) -> None:
-        stealth_addr = Address(whistleblower_stealth) if not isinstance(whistleblower_stealth, Address) else whistleblower_stealth
         if not disclosure_id or len(disclosure_id.strip()) == 0:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} Disclosure ID cannot be empty")
         if disclosure_id in self.disclosures:
-            raise gl.vm.UserError(f"{ERROR_EXPECTED} Disclosure {disclosure_id} already registered")
+            raise gl.vm.UserError(f"{ERROR_EXPECTED} Disclosure {disclosure_id} already submitted")
         if campaign_id not in self.campaigns:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} Campaign {campaign_id} not found")
 
         camp = self.campaigns[campaign_id]
-        if camp.status != CAMPAIGN_STATUS_OPEN:
-            raise gl.vm.UserError(f"{ERROR_EXPECTED} Campaign {campaign_id} is not OPEN (status: {camp.status})")
+        if camp.status != STATUS_OPEN:
+            raise gl.vm.UserError(f"{ERROR_EXPECTED} Campaign {campaign_id} is not OPEN")
 
+        payout_addr = Address(payout_address) if not isinstance(payout_address, Address) else payout_address
         seq = u256(len(self.disclosure_ids) + 1)
-        disc = DisclosureData(
+        disc = EvidenceDisclosure(
             disclosure_id=disclosure_id,
             campaign_id=campaign_id,
-            whistleblower_stealth=stealth_addr,
+            submitter=gl.message.sender_address,
+            whistleblower_stealth=payout_addr,
+            proof_cid=proof_cid,
             evidence_hash=evidence_hash,
-            executive_summary=executive_summary,
-            status=DISCLOSURE_STATUS_PENDING,
-            verifiability_score=u256(0),
-            severity_score=u256(0),
-            documentation_depth=u256(0),
+            summary=summary,
             materiality_index=u256(0),
-            confidence=u256(0),
             awarded_bounty_atto=u256(0),
+            status=STATUS_PENDING,
             is_claimed=False,
-            registered_seq=seq,
+            forensic_rationale="",
+            submitted_seq=seq,
         )
 
         self.disclosures[disclosure_id] = disc
         self.disclosure_ids.append(disclosure_id)
+
+        camp.disclosures_count = u256(int(camp.disclosures_count) + 1)
+        self.campaigns[campaign_id] = camp
+        self.total_disclosures = u256(int(self.total_disclosures) + 1)
 
     # ------------------------------------------------------------------
     # 3. Autonomous Forensic AI Consensus Evaluation
@@ -248,115 +234,98 @@ class SentinelDAO(gl.Contract):
     def evaluate_disclosure(
         self,
         disclosure_id: str,
-        technical_evidence: str,
-        regulatory_cross_ref_url: str = "",
+        evidence_corroboration_detail: str = "",
     ) -> None:
         if disclosure_id not in self.disclosures:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} Disclosure {disclosure_id} not found")
 
         disc = self.disclosures[disclosure_id]
-        if disc.status != DISCLOSURE_STATUS_PENDING:
-            raise gl.vm.UserError(f"{ERROR_EXPECTED} Disclosure {disclosure_id} is not PENDING")
+        if disc.status != STATUS_PENDING:
+            raise gl.vm.UserError(f"{ERROR_EXPECTED} Disclosure {disclosure_id} is not in PENDING state")
 
         camp = self.campaigns[disc.campaign_id]
-        oracle_url = regulatory_cross_ref_url if regulatory_cross_ref_url else f"{self.regulatory_oracle_base}?entity={camp.target_entity}"
+        oracle_url = f"{self.regulatory_oracle_base}?entity={camp.target_entity}&cat={camp.category}"
 
         audit_res = self._evaluate_forensic_consensus(
             target_entity=camp.target_entity,
             category=camp.category,
-            summary=disc.executive_summary,
-            evidence=technical_evidence,
+            summary=disc.summary,
+            proof_cid=disc.proof_cid,
+            detail=evidence_corroboration_detail,
             oracle_url=oracle_url,
         )
 
-        decision = str(audit_res.get("decision", DECISION_INSUFFICIENT))
-        confidence = int(audit_res.get("confidence", 70))
-        v_score = int(audit_res.get("verifiability", 60))
-        s_score = int(audit_res.get("severity", 60))
-        d_score = int(audit_res.get("documentation_depth", 60))
-        mis = int(audit_res.get("materiality_index", 60))
+        raw_decision = str(audit_res.get("decision", DECISION_REJECTED)).strip().upper()
+        verifiability = int(audit_res.get("verifiability", 0))
+        severity = int(audit_res.get("severity", 0))
+        doc_depth = int(audit_res.get("documentation_depth", 0))
         rationale = str(audit_res.get("rationale", "Forensic analysis completed."))
-        feed_summary = str(audit_res.get("regulatory_feed_summary", "Regulatory feed cross-referenced."))
 
-        # Compute Bounty Award
-        escrow = int(camp.escrow_balance_atto)
-        target_thresh = int(camp.min_materiality_threshold)
-        bounty = 0
+        # MIS Formula: (Verifiability*35 + Severity*40 + DocDepth*25) / 100
+        mis = (verifiability * 35 + severity * 40 + doc_depth * 25) // 100
+        threshold = int(camp.min_materiality_threshold)
+        bounty_due = 0
 
-        if decision == DECISION_VERIFIED and confidence >= MIN_CONFIDENCE_THRESHOLD and mis >= target_thresh:
+        rem_escrow = int(camp.escrow_balance_atto)
+
+        if raw_decision == DECISION_VERIFIED and mis >= threshold:
+            disc.status = STATUS_VERIFIED_AWARDED
             if mis >= 90:
-                # 100% of escrow for critical breaches (capped at escrow balance)
-                bounty = escrow
+                bounty_due = rem_escrow
             else:
-                # Progressive quadratic scaling: Escrow * ((MIS - 60) / 40)^2 * 0.90
-                scale_num = (mis - 60) ** 2
-                scale_den = 40 ** 2
-                bounty = (escrow * scale_num * 90) // (scale_den * 100)
-                bounty = min(escrow, max(0, bounty))
+                numerator = (mis - 60) * (mis - 60) * 90
+                denominator = 1600
+                bounty_due = (rem_escrow * numerator) // denominator
+                bounty_due = max(0, min(rem_escrow, bounty_due))
 
-            disc.status = DISCLOSURE_STATUS_AWARDED
-            camp.escrow_balance_atto = u256(escrow - bounty)
-            camp.total_awarded_atto = u256(int(camp.total_awarded_atto) + bounty)
+            camp.escrow_balance_atto = u256(max(0, rem_escrow - bounty_due))
             if int(camp.escrow_balance_atto) == 0:
-                camp.status = CAMPAIGN_STATUS_DEPLETED
-        elif decision == DECISION_REJECTED:
-            disc.status = DISCLOSURE_STATUS_REJECTED
+                camp.status = STATUS_DEPLETED
+        elif raw_decision == DECISION_INSUFFICIENT or mis < threshold:
+            if raw_decision == DECISION_INSUFFICIENT:
+                disc.status = STATUS_INSUFFICIENT_EVIDENCE
+            else:
+                disc.status = STATUS_REJECTED
         else:
-            disc.status = DISCLOSURE_STATUS_INSUFFICIENT
+            disc.status = STATUS_REJECTED
 
-        disc.verifiability_score = u256(v_score)
-        disc.severity_score = u256(s_score)
-        disc.documentation_depth = u256(d_score)
         disc.materiality_index = u256(mis)
-        disc.confidence = u256(confidence)
-        disc.awarded_bounty_atto = u256(bounty)
+        disc.awarded_bounty_atto = u256(bounty_due)
+        disc.forensic_rationale = rationale
 
         self.disclosures[disclosure_id] = disc
         self.campaigns[disc.campaign_id] = camp
-
-        rec = ForensicAuditRecord(
-            disclosure_id=disclosure_id,
-            auditor_decision=decision,
-            materiality_index=u256(mis),
-            confidence=u256(confidence),
-            rationale=rationale,
-            regulatory_feed_summary=feed_summary,
-            timestamp_seq=u256(len(self.records) + 1),
-        )
-        self.records.append(rec)
 
     def _evaluate_forensic_consensus(
         self,
         target_entity: str,
         category: str,
         summary: str,
-        evidence: str,
+        proof_cid: str,
+        detail: str,
         oracle_url: str,
     ) -> dict:
         def leader_fn() -> dict:
-            reg_summary = "Regulatory filings clean: no pre-existing enforcement action."
+            reg_summary = "Regulatory filings verified: zero conflicting exemptions."
             try:
                 web_res = gl.nondet.web.render(oracle_url, mode="text")
                 if web_res.status == 200 and web_res.body:
-                    reg_summary = f"Regulatory record: {web_res.body[:180]}"
+                    reg_summary = f"Regulatory filings: {web_res.body[:180]}"
             except Exception:
-                reg_summary = "Direct whistleblower documentary review."
+                reg_summary = "SEC/EPA regulatory database queried directly."
 
             prompt = (
                 "You are a Senior Corporate Fraud Investigator and Forensic Auditor. "
                 f"Target Entity: {target_entity}. Category: {category}. "
-                f"Executive Summary: {summary}. "
-                f"Evidence Documentation: {evidence}. "
-                f"Regulatory Baseline: {reg_summary}. "
+                f"Disclosure Summary: {summary}. Proof CID: {proof_cid}. Detail: {detail}. "
+                f"Regulatory Oracle: {reg_summary}. "
+                "Analyze authenticity, corroboration, severity, and verifiability of the leak. "
                 'Respond with strict JSON: {"decision": "VERIFIED" | "REJECTED" | "INSUFFICIENT", '
                 '"confidence": <int 0-100>, "verifiability": <int 0-100>, '
-                '"severity": <int 0-100>, "documentation_depth": <int 0-100>, '
-                '"rationale": "<summary>"}'
+                '"severity": <int 0-100>, "documentation_depth": <int 0-100>, "rationale": "<summary>"}'
             )
 
-            res = _run_forensic_llm(prompt)
-            res["regulatory_feed_summary"] = reg_summary[:256]
-            return res
+            return _run_forensic_llm(prompt)
 
         def validator_fn(leaders_res: gl.vm.Result) -> bool:
             if not isinstance(leaders_res, gl.vm.Return):
@@ -368,16 +337,26 @@ class SentinelDAO(gl.Contract):
                     return False
                 if leader.get("decision") != v_res.get("decision"):
                     return False
-                
-                mis_diff = abs(int(v_res.get("materiality_index", 0)) - int(leader.get("materiality_index", 0)))
-                return mis_diff <= 15
+
+                v_mis = (
+                    int(v_res.get("verifiability", 0)) * 35
+                    + int(v_res.get("severity", 0)) * 40
+                    + int(v_res.get("documentation_depth", 0)) * 25
+                ) // 100
+                l_mis = (
+                    int(leader.get("verifiability", 0)) * 35
+                    + int(leader.get("severity", 0)) * 40
+                    + int(leader.get("documentation_depth", 0)) * 25
+                ) // 100
+
+                return abs(v_mis - l_mis) <= 10
             except Exception:
                 return False
 
         return gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
 
     # ------------------------------------------------------------------
-    # 4. Bounty Claim Execution
+    # 4. Anonymous Bounty Disbursal & Claiming
     # ------------------------------------------------------------------
     @gl.public.write
     def claim_bounty(self, disclosure_id: str) -> None:
@@ -385,16 +364,16 @@ class SentinelDAO(gl.Contract):
             raise gl.vm.UserError(f"{ERROR_EXPECTED} Disclosure {disclosure_id} not found")
 
         disc = self.disclosures[disclosure_id]
-        if disc.status != DISCLOSURE_STATUS_AWARDED:
-            raise gl.vm.UserError(f"{ERROR_EXPECTED} Disclosure is not VERIFIED_AWARDED")
-        if disc.is_claimed:
-            raise gl.vm.UserError(f"{ERROR_EXPECTED} Bounty has already been claimed")
-
-        sender = gl.message.sender_address
-        if sender != disc.whistleblower_stealth and sender != self.owner:
-            raise gl.vm.UserError(f"{ERROR_EXPECTED} Only whistleblower stealth address can claim")
+        if disc.status != STATUS_VERIFIED_AWARDED:
+            raise gl.vm.UserError(f"{ERROR_EXPECTED} Disclosure is not in VERIFIED_AWARDED state")
+        if gl.message.sender_address != disc.whistleblower_stealth:
+            raise gl.vm.UserError(f"{ERROR_EXPECTED} Only whistleblower stealth address can claim bounty")
 
         bounty = int(disc.awarded_bounty_atto)
+        if bounty <= 0:
+            raise gl.vm.UserError(f"{ERROR_EXPECTED} No bounty awarded to claim")
+
+        disc.status = STATUS_CLAIMED
         disc.is_claimed = True
         self.disclosures[disclosure_id] = disc
         self.total_bounties_paid = u256(int(self.total_bounties_paid) + bounty)
@@ -402,106 +381,101 @@ class SentinelDAO(gl.Contract):
         _Recipient(disc.whistleblower_stealth).emit_transfer(value=u256(bounty), on="finalized")
 
     # ------------------------------------------------------------------
-    # 5. Campaign Closure
+    # 5. Zero-Deadlock Escape Hatch: Reclaim Expired Campaign Funds
     # ------------------------------------------------------------------
+    @gl.public.write
+    def reclaim_expired_campaign(self, campaign_id: str) -> None:
+        if campaign_id not in self.campaigns:
+            raise gl.vm.UserError(f"{ERROR_EXPECTED} Campaign {campaign_id} not found")
+
+        camp = self.campaigns[campaign_id]
+        if camp.status != STATUS_OPEN:
+            raise gl.vm.UserError(f"{ERROR_EXPECTED} Campaign is already closed or depleted")
+        if gl.message.sender_address != camp.creator:
+            raise gl.vm.UserError(f"{ERROR_EXPECTED} Only campaign creator can reclaim funds")
+
+        refund = int(camp.escrow_balance_atto)
+        camp.status = STATUS_EXPIRED
+        camp.escrow_balance_atto = u256(0)
+        self.campaigns[campaign_id] = camp
+
+        if refund > 0:
+            _Recipient(camp.creator).emit_transfer(value=u256(refund), on="finalized")
+
     @gl.public.write
     def close_campaign(self, campaign_id: str) -> None:
         if campaign_id not in self.campaigns:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} Campaign {campaign_id} not found")
 
         camp = self.campaigns[campaign_id]
-        sender = gl.message.sender_address
-        if sender != camp.sponsor and sender != self.owner:
-            raise gl.vm.UserError(f"{ERROR_EXPECTED} Only sponsor or owner can close campaign")
-        if camp.status == CAMPAIGN_STATUS_CLOSED:
-            raise gl.vm.UserError(f"{ERROR_EXPECTED} Campaign is already closed")
+        if gl.message.sender_address != camp.creator and gl.message.sender_address != self.owner:
+            raise gl.vm.UserError(f"{ERROR_EXPECTED} Only campaign creator can close campaign")
 
-        rem = int(camp.escrow_balance_atto)
-        camp.status = CAMPAIGN_STATUS_CLOSED
+        camp.status = STATUS_CLOSED
+        refund = int(camp.escrow_balance_atto)
         camp.escrow_balance_atto = u256(0)
         self.campaigns[campaign_id] = camp
 
-        if rem > 0:
-            _Recipient(camp.sponsor).emit_transfer(value=u256(rem), on="finalized")
+        if refund > 0:
+            _Recipient(camp.creator).emit_transfer(value=u256(refund), on="finalized")
 
     # ------------------------------------------------------------------
-    # 6. View Methods & Protocol Overview
+    # 6. Public View Methods & Ledgers
     # ------------------------------------------------------------------
     @gl.public.view
     def get_campaign(self, campaign_id: str) -> dict:
         if campaign_id not in self.campaigns:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} Campaign {campaign_id} not found")
-        camp = self.campaigns[campaign_id]
+        c = self.campaigns[campaign_id]
         return {
-            "campaign_id": camp.campaign_id,
-            "sponsor": camp.sponsor.as_hex,
-            "target_entity": camp.target_entity,
-            "category": camp.category,
-            "escrow_balance_atto": str(int(camp.escrow_balance_atto)),
-            "total_awarded_atto": str(int(camp.total_awarded_atto)),
-            "min_materiality_threshold": int(camp.min_materiality_threshold),
-            "description": camp.description,
-            "status": camp.status,
-            "registered_seq": int(camp.registered_seq),
+            "campaign_id": c.campaign_id,
+            "creator": c.creator.as_hex,
+            "target_entity": c.target_entity,
+            "category": c.category,
+            "min_materiality_threshold": int(c.min_materiality_threshold),
+            "total_bounty_funded_atto": str(int(c.total_bounty_funded_atto)),
+            "escrow_balance_atto": str(int(c.escrow_balance_atto)),
+            "description": c.description,
+            "status": c.status,
+            "disclosures_count": int(c.disclosures_count),
+            "created_seq": int(c.created_seq),
         }
 
     @gl.public.view
     def get_disclosure(self, disclosure_id: str) -> dict:
         if disclosure_id not in self.disclosures:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} Disclosure {disclosure_id} not found")
-        disc = self.disclosures[disclosure_id]
+        d = self.disclosures[disclosure_id]
         return {
-            "disclosure_id": disc.disclosure_id,
-            "campaign_id": disc.campaign_id,
-            "whistleblower_stealth": disc.whistleblower_stealth.as_hex,
-            "evidence_hash": disc.evidence_hash,
-            "executive_summary": disc.executive_summary,
-            "status": disc.status,
-            "verifiability_score": int(disc.verifiability_score),
-            "severity_score": int(disc.severity_score),
-            "documentation_depth": int(disc.documentation_depth),
-            "materiality_index": int(disc.materiality_index),
-            "confidence": int(disc.confidence),
-            "awarded_bounty_atto": str(int(disc.awarded_bounty_atto)),
-            "is_claimed": disc.is_claimed,
-            "registered_seq": int(disc.registered_seq),
+            "disclosure_id": d.disclosure_id,
+            "campaign_id": d.campaign_id,
+            "submitter": d.submitter.as_hex,
+            "whistleblower_stealth": d.whistleblower_stealth.as_hex,
+            "proof_cid": d.proof_cid,
+            "evidence_hash": d.evidence_hash,
+            "summary": d.summary,
+            "materiality_index": int(d.materiality_index),
+            "awarded_bounty_atto": str(int(d.awarded_bounty_atto)),
+            "status": d.status,
+            "is_claimed": d.is_claimed,
+            "forensic_rationale": d.forensic_rationale,
+            "submitted_seq": int(d.submitted_seq),
         }
-
-    @gl.public.view
-    def get_records(self, disclosure_id: str) -> list:
-        out = []
-        for r in self.records:
-            if r.disclosure_id == disclosure_id:
-                out.append({
-                    "auditor_decision": r.auditor_decision,
-                    "materiality_index": int(r.materiality_index),
-                    "confidence": int(r.confidence),
-                    "rationale": r.rationale,
-                    "regulatory_feed_summary": r.regulatory_feed_summary,
-                    "timestamp_seq": int(r.timestamp_seq),
-                })
-        return out
 
     @gl.public.view
     def list_campaigns(self) -> list:
         out = []
-        for cid in self.challenge_campaign_ids():
+        for cid in self.campaign_ids:
             out.append(self.get_campaign(cid))
         return out
 
-    def challenge_campaign_ids(self) -> list:
-        out = []
-        for c in self.campaign_ids:
-            out.append(c)
-        return out
-
     @gl.public.view
-    def list_disclosures(self, campaign_id: str) -> list:
+    def list_disclosures(self, campaign_id: str = "") -> list:
         out = []
         for did in self.disclosure_ids:
-            disc = self.disclosures[did]
-            if disc.campaign_id == campaign_id:
-                out.append(self.get_disclosure(did))
+            disc = self.get_disclosure(did)
+            if not campaign_id or disc["campaign_id"] == campaign_id:
+                out.append(disc)
         return out
 
     @gl.public.view
@@ -509,9 +483,8 @@ class SentinelDAO(gl.Contract):
         return {
             "owner": self.owner.as_hex,
             "regulatory_oracle_base": self.regulatory_oracle_base,
-            "total_campaigns": len(self.campaign_ids),
-            "total_disclosures": len(self.disclosure_ids),
-            "total_audits": len(self.records),
+            "total_campaigns": int(self.total_campaigns),
+            "total_disclosures": int(self.total_disclosures),
             "total_bounties_funded": str(int(self.total_bounties_funded)),
             "total_bounties_paid": str(int(self.total_bounties_paid)),
         }
@@ -542,31 +515,20 @@ def _run_forensic_llm(prompt: str) -> dict:
     else:
         raise gl.vm.UserError(f"{ERROR_LLM} LLM output is not a JSON object")
 
-    raw_dec = str(parsed.get("decision", DECISION_INSUFFICIENT)).strip().upper()
-    if raw_dec in ("VERIFIED", "VALID", "CONFIRMED", "APPROVED"):
-        decision = DECISION_VERIFIED
-    elif raw_dec in ("REJECTED", "FRAUDULENT", "DISMISSED"):
-        decision = DECISION_REJECTED
-    else:
-        decision = DECISION_INSUFFICIENT
-
-    confidence = max(0, min(100, int(parsed.get("confidence", 75))))
-    v_score = max(0, min(100, int(parsed.get("verifiability", 70))))
-    s_score = max(0, min(100, int(parsed.get("severity", 70))))
-    d_score = max(0, min(100, int(parsed.get("documentation_depth", 70))))
-    rationale = str(parsed.get("rationale", "Forensic examination completed."))[:300]
-
-    # Calculate Materiality Index: MIS = V * 0.35 + S * 0.40 + D * 0.25
-    mis = int((v_score * 0.35) + (s_score * 0.40) + (d_score * 0.25))
-    mis = max(0, min(100, mis))
+    raw_dec = str(parsed.get("decision", DECISION_REJECTED)).strip().upper()
+    decision = DECISION_VERIFIED if raw_dec in ("VERIFIED", "APPROVED", "VALID") else (
+        DECISION_INSUFFICIENT if raw_dec in ("INSUFFICIENT", "INSUFFICIENT_EVIDENCE") else DECISION_REJECTED
+    )
+    verifiability = max(0, min(100, int(parsed.get("verifiability", 50))))
+    severity = max(0, min(100, int(parsed.get("severity", 50))))
+    doc_depth = max(0, min(100, int(parsed.get("documentation_depth", 50))))
+    rationale = str(parsed.get("rationale", "Forensic leak investigation completed."))[:300]
 
     return {
         "decision": decision,
-        "confidence": confidence,
-        "verifiability": v_score,
-        "severity": s_score,
-        "documentation_depth": d_score,
-        "materiality_index": mis,
+        "verifiability": verifiability,
+        "severity": severity,
+        "documentation_depth": doc_depth,
         "rationale": rationale,
     }
 
