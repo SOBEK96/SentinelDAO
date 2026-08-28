@@ -497,3 +497,33 @@ def test_list_campaigns_and_disclosures(direct_vm, direct_deploy, direct_alice, 
     discs = contract.list_disclosures("camp-list-test")
     assert len(discs) == 1
     assert discs[0]["disclosure_id"] == "disc-list-test"
+
+
+def test_grounded_web_fetch_failure_rejection(direct_vm, direct_deploy, direct_alice, direct_bob, direct_charlie):
+    contract = direct_deploy(CONTRACT_PATH)
+
+    direct_vm.sender = direct_alice
+    direct_vm.value = 20 * ATTO
+    contract.create_campaign(
+        "camp-grounded-test",
+        "Target Corp",
+        "ACCOUNTING_FRAUD",
+        70,
+        "Description",
+    )
+
+    direct_vm.sender = direct_bob
+    contract.submit_disclosure(
+        "disc-grounded-fail",
+        "camp-grounded-test",
+        "ipfs://proof",
+        "Summary",
+        direct_charlie,
+    )
+
+    # Mock web returning HTTP 500
+    direct_vm.mock_web(r".*", {"status": 500, "body": "Internal Server Error"})
+
+    with pytest.raises(Exception) as exc:
+        contract.evaluate_disclosure("disc-grounded-fail")
+    assert "[EXTERNAL]" in str(exc.value) or "500" in str(exc.value)

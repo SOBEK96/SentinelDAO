@@ -10,8 +10,8 @@ from genlayer import *
 STATUS_OPEN = "OPEN"
 STATUS_PENDING = "PENDING"
 STATUS_VERIFIED_AWARDED = "VERIFIED_AWARDED"
-STATUS_REJECTED = "REJECTED"
 STATUS_INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
+STATUS_REJECTED = "REJECTED"
 STATUS_CLAIMED = "CLAIMED"
 STATUS_CLOSED = "CLOSED"
 STATUS_DEPLETED = "DEPLETED"
@@ -21,16 +21,20 @@ DECISION_VERIFIED = "VERIFIED"
 DECISION_REJECTED = "REJECTED"
 DECISION_INSUFFICIENT = "INSUFFICIENT"
 
-CATEGORIES = {
+VALID_CAMPAIGN_CATEGORIES = {
     "ACCOUNTING_FRAUD",
     "ESG_ENVIRONMENTAL",
     "INSIDER_TRADING",
     "CORRUPTION_BRIBERY",
     "AI_SAFETY_VIOLATION",
+    "PRODUCT_SAFETY_DEFECT",
+    "CYBERSECURITY_BREACH",
 }
 
 ATTO = 10**18
-MIN_CAMPAIGN_ESCROW = 5 * ATTO  # 5 GEN minimum bounty pool
+MIN_CAMPAIGN_BOUNTY = 5 * ATTO      # 5 GEN minimum campaign bounty funding
+MIN_MATERIALITY_THRESHOLD = 60     # Minimum MIS score to qualify for progressive payout
+MAX_MATERIALITY_THRESHOLD = 100
 
 ERROR_EXPECTED = "[EXPECTED]"
 ERROR_EXTERNAL = "[EXTERNAL]"
@@ -43,7 +47,7 @@ ERROR_LLM = "[LLM]"
 # -----------------------------------------------------------------------------
 @allow_storage
 @dataclass
-class WhistleblowerCampaign:
+class BountyCampaign:
     campaign_id: str
     creator: Address
     target_entity: str
@@ -63,11 +67,11 @@ class EvidenceDisclosure:
     disclosure_id: str
     campaign_id: str
     submitter: Address
-    whistleblower_stealth: Address
-    proof_cid: str                  # ipfs:// CID of encrypted leaks
-    evidence_hash: str              # sha256 commitment hash
+    whistleblower_stealth: Address   # Stealth payout address to preserve anonymity
+    proof_cid: str                   # Encrypted IPFS / Arweave CID of primary documents
+    evidence_hash: str               # Merkle root / SHA256 commitment of raw files
     summary: str
-    materiality_index: u256
+    materiality_index: u256          # Materiality & Impact Score (MIS, 0-100)
     awarded_bounty_atto: u256
     status: str
     is_claimed: bool
@@ -91,21 +95,21 @@ class SentinelDAO(gl.Contract):
     owner: Address
     regulatory_oracle_base: str
 
-    # Global Double-Entry Escrow & Accounting Ledgers
+    # Global Multi-Ledger Accounting
     total_campaigns: u256
     total_disclosures: u256
     total_bounties_funded: u256
     total_bounties_paid: u256
 
-    # Campaigns: campaign_id -> WhistleblowerCampaign
-    campaigns: TreeMap[str, WhistleblowerCampaign]
+    # Campaigns Store: campaign_id -> BountyCampaign
+    campaigns: TreeMap[str, BountyCampaign]
     campaign_ids: DynArray[str]
 
-    # Disclosures: disclosure_id -> EvidenceDisclosure
+    # Disclosures Store: disclosure_id -> EvidenceDisclosure
     disclosures: TreeMap[str, EvidenceDisclosure]
     disclosure_ids: DynArray[str]
 
-    def __init__(self, regulatory_oracle_base: str = "https://api.sentineldao.org/v1/sec-filings"):
+    def __init__(self, regulatory_oracle_base: str = "https://api.sentineldao.org/v1/sec-enforcement"):
         self.owner = gl.message.sender_address
         self.regulatory_oracle_base = regulatory_oracle_base
         self.total_campaigns = u256(0)
@@ -114,7 +118,7 @@ class SentinelDAO(gl.Contract):
         self.total_bounties_paid = u256(0)
 
     # ------------------------------------------------------------------
-    # 1. Whistleblower Bounty Campaign Creation & Funding
+    # 1. Bounty Campaign Creation & Treasury Escrow
     # ------------------------------------------------------------------
     @gl.public.write.payable
     def create_campaign(
@@ -122,31 +126,33 @@ class SentinelDAO(gl.Contract):
         campaign_id: str,
         target_entity: str,
         category: str,
-        materiality_threshold: u256,
-        description: str,
+        min_materiality_threshold: u256,
+        description: str = "Whistleblower Intelligence Bounty Campaign",
     ) -> None:
         if not campaign_id or len(campaign_id.strip()) == 0:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} Campaign ID cannot be empty")
         if campaign_id in self.campaigns:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} Campaign {campaign_id} already exists")
-        if category not in CATEGORIES:
+        if not target_entity or len(target_entity.strip()) == 0:
+            raise gl.vm.UserError(f"{ERROR_EXPECTED} Target entity name is required")
+        if category not in VALID_CAMPAIGN_CATEGORIES:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} Invalid category: {category}")
 
-        thresh = int(materiality_threshold)
-        if thresh < 60 or thresh > 100:
+        thresh = int(min_materiality_threshold)
+        if thresh < MIN_MATERIALITY_THRESHOLD or thresh > MAX_MATERIALITY_THRESHOLD:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} Materiality threshold must be between 60 and 100")
 
         escrow = int(gl.message.value)
-        if escrow < int(MIN_CAMPAIGN_ESCROW):
+        if escrow < int(MIN_CAMPAIGN_BOUNTY):
             raise gl.vm.UserError(f"{ERROR_EXPECTED} Minimum campaign escrow is 5 GEN")
 
         seq = u256(len(self.campaign_ids) + 1)
-        camp = WhistleblowerCampaign(
+        camp = BountyCampaign(
             campaign_id=campaign_id,
             creator=gl.message.sender_address,
             target_entity=target_entity,
             category=category,
-            min_materiality_threshold=materiality_threshold,
+            min_materiality_threshold=min_materiality_threshold,
             total_bounty_funded_atto=u256(escrow),
             escrow_balance_atto=u256(escrow),
             description=description,
@@ -246,12 +252,17 @@ class SentinelDAO(gl.Contract):
         camp = self.campaigns[disc.campaign_id]
         oracle_url = f"{self.regulatory_oracle_base}?entity={camp.target_entity}&cat={camp.category}"
 
+        threshold = int(camp.min_materiality_threshold)
+        rem_escrow = int(camp.escrow_balance_atto)
+
         audit_res = self._evaluate_forensic_consensus(
             target_entity=camp.target_entity,
             category=camp.category,
             summary=disc.summary,
             proof_cid=disc.proof_cid,
             detail=evidence_corroboration_detail,
+            threshold=threshold,
+            rem_escrow=rem_escrow,
             oracle_url=oracle_url,
         )
 
@@ -261,34 +272,21 @@ class SentinelDAO(gl.Contract):
         doc_depth = int(audit_res.get("documentation_depth", 0))
         rationale = str(audit_res.get("rationale", "Forensic analysis completed."))
 
-        # MIS Formula: (Verifiability*35 + Severity*40 + DocDepth*25) / 100
-        mis = (verifiability * 35 + severity * 40 + doc_depth * 25) // 100
-        threshold = int(camp.min_materiality_threshold)
-        bounty_due = 0
+        final_status, mis, bounty_due = _compute_bounty_settlement(
+            decision=raw_decision,
+            verifiability=verifiability,
+            severity=severity,
+            doc_depth=doc_depth,
+            threshold=threshold,
+            rem_escrow=rem_escrow,
+        )
 
-        rem_escrow = int(camp.escrow_balance_atto)
-
-        if raw_decision == DECISION_VERIFIED and mis >= threshold:
-            disc.status = STATUS_VERIFIED_AWARDED
-            if mis >= 90:
-                bounty_due = rem_escrow
-            else:
-                numerator = (mis - 60) * (mis - 60) * 90
-                denominator = 1600
-                bounty_due = (rem_escrow * numerator) // denominator
-                bounty_due = max(0, min(rem_escrow, bounty_due))
-
+        if final_status == STATUS_VERIFIED_AWARDED and bounty_due > 0:
             camp.escrow_balance_atto = u256(max(0, rem_escrow - bounty_due))
             if int(camp.escrow_balance_atto) == 0:
                 camp.status = STATUS_DEPLETED
-        elif raw_decision == DECISION_INSUFFICIENT or mis < threshold:
-            if raw_decision == DECISION_INSUFFICIENT:
-                disc.status = STATUS_INSUFFICIENT_EVIDENCE
-            else:
-                disc.status = STATUS_REJECTED
-        else:
-            disc.status = STATUS_REJECTED
 
+        disc.status = final_status
         disc.materiality_index = u256(mis)
         disc.awarded_bounty_atto = u256(bounty_due)
         disc.forensic_rationale = rationale
@@ -303,14 +301,24 @@ class SentinelDAO(gl.Contract):
         summary: str,
         proof_cid: str,
         detail: str,
+        threshold: int,
+        rem_escrow: int,
         oracle_url: str,
     ) -> dict:
         def leader_fn() -> dict:
             reg_summary = "Regulatory filings verified: zero conflicting exemptions."
             try:
-                web_res = gl.nondet.web.render(oracle_url, mode="text")
-                if web_res.status == 200 and web_res.body:
-                    reg_summary = f"Regulatory filings: {web_res.body[:180]}"
+                web_res = gl.nondet.web.get(oracle_url)
+                if hasattr(web_res, "status") and (web_res.status < 200 or web_res.status >= 300):
+                    raise gl.vm.UserError(f"{ERROR_EXTERNAL} Regulatory oracle returned HTTP {web_res.status}")
+                if hasattr(web_res, "body"):
+                    body_str = web_res.body if isinstance(web_res.body, str) else web_res.body.decode("utf-8", errors="ignore")
+                else:
+                    body_str = str(web_res)
+                if len(body_str.strip()) >= 10:
+                    reg_summary = f"Regulatory filings: {body_str.strip()[:180]}"
+            except gl.vm.UserError:
+                raise
             except Exception:
                 reg_summary = "SEC/EPA regulatory database queried directly."
 
@@ -333,23 +341,51 @@ class SentinelDAO(gl.Contract):
             try:
                 v_res = leader_fn()
                 leader = leaders_res.calldata
-                if not isinstance(leader, dict):
+                if not isinstance(leader, dict) or not isinstance(v_res, dict):
                     return False
+
+                # 1. Exact agreement on raw decision enum:
                 if leader.get("decision") != v_res.get("decision"):
                     return False
 
-                v_mis = (
-                    int(v_res.get("verifiability", 0)) * 35
-                    + int(v_res.get("severity", 0)) * 40
-                    + int(v_res.get("documentation_depth", 0)) * 25
-                ) // 100
-                l_mis = (
-                    int(leader.get("verifiability", 0)) * 35
-                    + int(leader.get("severity", 0)) * 40
-                    + int(leader.get("documentation_depth", 0)) * 25
-                ) // 100
+                # 2. Derive exact financial settlement parameters for both nodes:
+                l_status, l_mis, l_bounty = _compute_bounty_settlement(
+                    decision=str(leader.get("decision", DECISION_REJECTED)),
+                    verifiability=int(leader.get("verifiability", 0)),
+                    severity=int(leader.get("severity", 0)),
+                    doc_depth=int(leader.get("documentation_depth", 0)),
+                    threshold=threshold,
+                    rem_escrow=rem_escrow,
+                )
 
-                return abs(v_mis - l_mis) <= 10
+                v_status, v_mis, v_bounty = _compute_bounty_settlement(
+                    decision=str(v_res.get("decision", DECISION_REJECTED)),
+                    verifiability=int(v_res.get("verifiability", 0)),
+                    severity=int(v_res.get("severity", 0)),
+                    doc_depth=int(v_res.get("documentation_depth", 0)),
+                    threshold=threshold,
+                    rem_escrow=rem_escrow,
+                )
+
+                # 3. Exact agreement on final award status:
+                if l_status != v_status:
+                    return False
+
+                # 4. Strict Financial Determinism: Zero variance in awarded bounty amount:
+                if l_bounty != v_bounty:
+                    return False
+
+                # 5. Discrete threshold boundary gates:
+                if (l_mis >= threshold) != (v_mis >= threshold):
+                    return False
+                if (l_mis >= 90) != (v_mis >= 90):
+                    return False
+
+                # 6. Bounded variance within identical settlement outcome (<= 5 points):
+                if abs(v_mis - l_mis) > 5:
+                    return False
+
+                return True
             except Exception:
                 return False
 
@@ -491,6 +527,30 @@ class SentinelDAO(gl.Contract):
 
 
 # --- Internal Helpers -----------------------------------------------------
+def _compute_bounty_settlement(
+    decision: str,
+    verifiability: int,
+    severity: int,
+    doc_depth: int,
+    threshold: int,
+    rem_escrow: int,
+) -> tuple[str, int, int]:
+    mis = (verifiability * 35 + severity * 40 + doc_depth * 25) // 100
+    if decision == DECISION_VERIFIED and mis >= threshold:
+        if mis >= 90:
+            bounty_due = rem_escrow
+        else:
+            numerator = (mis - 60) * (mis - 60) * 90
+            denominator = 1600
+            bounty_due = (rem_escrow * numerator) // denominator
+            bounty_due = max(0, min(rem_escrow, bounty_due))
+        return (STATUS_VERIFIED_AWARDED, mis, bounty_due)
+    elif decision == DECISION_INSUFFICIENT:
+        return (STATUS_INSUFFICIENT_EVIDENCE, mis, 0)
+    else:
+        return (STATUS_REJECTED, mis, 0)
+
+
 def _run_forensic_llm(prompt: str) -> dict:
     try:
         raw = gl.nondet.exec_prompt(prompt, response_format="json")
